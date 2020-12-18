@@ -900,6 +900,7 @@ Status Reader::compute_range_result_coords(
     std::vector<ResultCoords>* result_coords) {
   auto coords_num = tile->cell_num();
   auto dim_num = array_schema_->dim_num();
+  auto cell_order = array_schema_->cell_order();
   auto range_coords = subarray->get_range_coords(range_idx);
 
   if (array_schema_->dense()) {
@@ -928,9 +929,13 @@ Status Reader::compute_range_result_coords(
 
     // Compute result and overwritten bitmap per dimension
     for (unsigned d = 0; d < dim_num; ++d) {
-      const auto& ranges = subarray->ranges_for_dim(d);
+      // For col-major cell ordering, iterate the dimensions
+      // in reverse.
+      const unsigned dim_idx =
+          cell_order == Layout::COL_MAJOR ? dim_num - d - 1 : d;
+      const auto& ranges = subarray->ranges_for_dim(dim_idx);
       RETURN_NOT_OK(tile->compute_results_sparse(
-          d, ranges[range_coords[d]], &result_bitmap));
+          dim_idx, ranges[range_coords[dim_idx]], &result_bitmap, cell_order));
     }
 
     // Gather results
@@ -3310,8 +3315,10 @@ Status Reader::add_extra_offset() {
     if (!array_schema_->is_attr(name) || !array_schema_->var_size(name))
       continue;
 
-    if (*it.second.buffer_size_ + constants::cell_var_offset_size >
-        it.second.original_buffer_size_) {
+    auto max_buffer_size = offsets_bitsize_ == 32 ?
+                               it.second.original_buffer_size_ / 2 :
+                               it.second.original_buffer_size_;
+    if (*it.second.buffer_size_ + offsets_bytesize() > max_buffer_size) {
       // Error out for now
       return LOG_STATUS(Status::ReaderError(
           "Not enough memory in user buffer for extra element"));
@@ -3322,20 +3329,17 @@ Status Reader::add_extra_offset() {
       memcpy(
           buffer + *it.second.buffer_size_,
           it.second.buffer_var_size_,
-          constants::cell_var_offset_size);
+          offsets_bytesize());
     } else if (offsets_format_mode_ == "elements") {
       auto elements = *it.second.buffer_var_size_ /
                       datatype_size(array_schema_->type(name));
-      memcpy(
-          buffer + *it.second.buffer_size_,
-          &elements,
-          constants::cell_var_offset_size);
+      memcpy(buffer + *it.second.buffer_size_, &elements, offsets_bytesize());
     } else {
       return LOG_STATUS(Status::ReaderError(
           "Cannot add extra offset to buffer; Unsupported offsets format"));
     }
 
-    *it.second.buffer_size_ += constants::cell_var_offset_size;
+    *it.second.buffer_size_ += offsets_bytesize();
   }
 
   return Status::Ok();
